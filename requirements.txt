@@ -1,0 +1,7 @@
+anthropic
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+pandas
+statsbombpy
