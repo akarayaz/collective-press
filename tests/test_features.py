@@ -114,17 +114,18 @@ def test_closing_speed_signs():
 
 
 def test_cover_shadow():
-    """A defender on the passing lane blocks it; one off the lane does not."""
+    """A teammate behind the presser is cut off; one off the lane is open."""
     sc = make_scene([
         {"id": 1, "x": 0.0, "y": 0.0, "side": "attacking", "carrier": True},
-        {"id": 2, "x": 10.0, "y": 0.0, "side": "attacking"},   # blocked
+        {"id": 2, "x": 10.0, "y": 0.0, "side": "attacking"},   # lane blocked
         {"id": 3, "x": 0.0, "y": 10.0, "side": "attacking"},   # open
         {"id": 4, "x": 5.0, "y": 0.0, "side": "pressing", "presser": True},
     ])
     f = scene_features(sc)
-    close(f["n_options"], 2.0)
     close(f["options_shadowed_by_presser"], 1.0)
-    close(f["options_shadowed_by_team"], 1.0)
+    close(f["n_open_short"], 1.0)
+    close(f["n_open_forward"], 0.0)       # the open one is level, not ahead
+    close(f["nearest_open_dist"], 10.0)
 
 
 def test_defender_past_the_receiver_does_not_block():
@@ -137,17 +138,49 @@ def test_defender_past_the_receiver_does_not_block():
     close(scene_features(sc)["options_shadowed_by_presser"], 0.0)
 
 
-def test_team_blocks_more_lanes_than_the_presser_alone():
+def test_marked_receiver_is_not_open():
+    """A clear lane is not enough when a defender stands next to the receiver."""
     sc = make_scene([
         {"id": 1, "x": 0.0, "y": 0.0, "side": "attacking", "carrier": True},
-        {"id": 2, "x": 10.0, "y": 0.0, "side": "attacking"},
-        {"id": 3, "x": 0.0, "y": 10.0, "side": "attacking"},
-        {"id": 4, "x": 5.0, "y": 0.0, "side": "pressing", "presser": True},
-        {"id": 5, "x": 0.0, "y": 5.0, "side": "pressing"},
+        {"id": 2, "x": 0.0, "y": 10.0, "side": "attacking"},
+        {"id": 3, "x": 1.0, "y": 10.0, "side": "pressing"},    # 1 m away
+        {"id": 4, "x": -6.0, "y": -6.0, "side": "pressing", "presser": True},
     ])
     f = scene_features(sc)
+    close(f["n_open_short"], 0.0)
+    assert pd.isna(f["nearest_open_dist"]), "no open option means no distance"
+
+
+def test_open_options_counted_by_distance_band():
+    """Short up to 15 m, medium up to 30 m, long beyond."""
+    sc = make_scene([
+        {"id": 1, "x": 0.0, "y": 0.0, "side": "attacking", "carrier": True},
+        {"id": 2, "x": 10.0, "y": 0.0, "side": "attacking"},   # short
+        {"id": 3, "x": 20.0, "y": 0.0, "side": "attacking"},   # medium
+        {"id": 4, "x": 40.0, "y": 0.0, "side": "attacking"},   # long
+        {"id": 5, "x": 0.0, "y": -5.0, "side": "pressing", "presser": True},
+    ])
+    f = scene_features(sc)
+    close(f["n_open_short"], 1.0)
+    close(f["n_open_medium"], 1.0)
+    close(f["n_open_long"], 1.0)
+    close(f["n_open_forward"], 3.0)
+    close(f["nearest_open_dist"], 10.0)
+
+
+def test_long_ball_goes_over_the_press():
+    """A defender under the line cuts a 25 m pass but not a 40 m one."""
+    sc = make_scene([
+        {"id": 1, "x": 0.0, "y": 0.0, "side": "attacking", "carrier": True},
+        {"id": 2, "x": 25.0, "y": 0.0, "side": "attacking"},   # medium, cut
+        {"id": 3, "x": 40.0, "y": 0.0, "side": "attacking"},   # long, in the air
+        {"id": 4, "x": 12.0, "y": 0.0, "side": "pressing", "presser": True},
+    ])
+    f = scene_features(sc)
+    close(f["n_open_medium"], 0.0)
+    close(f["n_open_long"], 1.0)
+    # Only lanes up to 30 m count as shadowed: the long ball is not.
     close(f["options_shadowed_by_presser"], 1.0)
-    close(f["options_shadowed_by_team"], 2.0)
 
 
 def test_local_counts_and_advantage():

@@ -67,7 +67,7 @@ def make_table(signal: str, seed: int = 0) -> pd.DataFrame:
 
     context_term = 0.9 * df["m0_xloss_player_possession_start"]
     tracking_term = (
-        1.4 * df["f_presser_dist"] - 1.1 * df["f_options_shadowed_by_team"]
+        1.4 * df["f_presser_dist"] - 1.1 * df["f_n_open_short"]
     )
     logit = -1.3 + context_term
     if signal == "tracking":
