@@ -108,26 +108,6 @@ def ball_xy(record: dict) -> tuple[float, float] | None:
     return float(x), float(y)
 
 
-def velocities(
-    prev: pd.DataFrame, curr: pd.DataFrame, dt: float
-) -> pd.DataFrame:
-    """Per-player velocity in m/s from two frames.
-
-    Returns columns ``vx, vy, speed`` indexed like ``curr``; players missing
-    from ``prev`` get NaN.
-    """
-    joined = curr[["x", "y"]].join(prev[["x", "y"]], rsuffix="_prev", how="left")
-    # Cast explicitly: whenever the earlier frame is missing the joined columns
-    # are all-NaN, and left as object dtype they break the hypot below.
-    joined = joined.astype("float64")
-    vx = (joined["x"] - joined["x_prev"]) / dt
-    vy = (joined["y"] - joined["y_prev"]) / dt
-    return pd.DataFrame(
-        {"vx": vx, "vy": vy, "speed": np.hypot(vx.to_numpy(), vy.to_numpy())},
-        index=curr.index,
-    )
-
-
 def velocities_fit(
     history: list[tuple[float, pd.DataFrame]],
     curr: pd.DataFrame,
@@ -140,10 +120,11 @@ def velocities_fit(
     frame itself at ``t = 0``. Only past and present frames go in, never later
     ones, so nothing after the engagement start can leak into the velocity.
 
-    Compared with :func:`velocities`, which differences two frames, the slope
-    uses every frame in the window: one noisy position moves it far less, and a
-    single missing frame no longer turns everyone's velocity into NaN. A player
-    seen in fewer than ``min_points`` frames of the window gets NaN.
+    Compared with differencing two frames (the method used until 14 October
+    2026), the slope uses every frame in the window: one noisy position moves it
+    far less, and a single missing frame no longer turns everyone's velocity
+    into NaN. A player seen in fewer than ``min_points`` frames of the window
+    gets NaN.
 
     Returns columns ``vx, vy, speed`` indexed like ``curr``.
     """
