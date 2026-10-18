@@ -18,6 +18,12 @@ inputs of the ``skillcorner_geometry`` tabular model:
 ``transformer``  tokens attend to each other before pooling, so it can see
                  pairs: a presser and the teammate covering him, a defender
                  and the lane he stands in.
+``gnn``          a graph network: players within ``--gnn-radius`` metres are
+                 linked, and every link carries the distance, direction and
+                 relative velocity between the two players. The transformer
+                 has to learn distances from coordinates; the graph is given
+                 them, which is the middle ground between the raw scene and
+                 the hand-made metrics.
 
 Two more networks see no scene, so the scene models have a fair baseline:
 
@@ -62,12 +68,18 @@ METRICS = modelling.TRACKING_GEOMETRY
 KINDS = {
     "deepsets": (True, CONTEXT),
     "transformer": (True, CONTEXT),
+    "gnn": (True, CONTEXT),
     "mlp_context": (False, CONTEXT),
     "mlp_metrics": (False, CONTEXT + METRICS),
 }
 
-# Feature positions in a token, as written by export_scenes.py.
+# Feature positions and scales in a token, as written by export_scenes.py.
 Y_FEATURES = (1, 3, 5)  # y, dy, vy: flipped together to mirror the pitch
+REL = slice(2, 4)       # position relative to the carrier, divided by REL_SCALE
+VEL = slice(4, 6)       # velocity, divided by VEL_SCALE
+SIDE = slice(6, 9)      # pressing, attacking, ball
+REL_SCALE, VEL_SCALE = 20.0, 8.0  # must match export_scenes.py
+N_EDGE = 6              # dx, dy, distance, dvx, dvy, same side
 
 
 # --- inputs ----------------------------------------------------------------------
@@ -131,12 +143,58 @@ def load(label: str):
 
 # --- the models ------------------------------------------------------------------
 
+def edge_features(X, mask, radius: float):
+    """Pairwise features between tokens, and which pairs are linked.
+
+    Returns ``(E, adj)``: ``E`` is (batch, n, n, N_EDGE), ``adj`` is a boolean
+    (batch, n, n) that links two real tokens closer than ``radius`` metres.
+    """
+    import torch
+
+    pos = X[..., REL] * REL_SCALE                      # metres
+    vel = X[..., VEL] * VEL_SCALE                      # m/s
+    side = X[..., SIDE]
+    d = pos[:, None, :, :] - pos[:, :, None, :]        # from i to j
+    dist = d.norm(dim=-1, keepdim=True)
+    dv = vel[:, None, :, :] - vel[:, :, None, :]
+    same = (side[:, :, None, :] * side[:, None, :, :]).sum(-1, keepdim=True)
+    E = torch.cat([d / REL_SCALE, dist / REL_SCALE, dv / VEL_SCALE, same], dim=-1)
+    n = X.shape[1]
+    eye = torch.eye(n, dtype=torch.bool, device=X.device)
+    adj = (dist.squeeze(-1) <= radius) & mask[:, :, None] & mask[:, None, :] & ~eye
+    return E, adj
+
+
 def build_model(kind: str, n_feat: int, n_ctx: int, d: int, layers: int, heads: int,
-                dropout: float, base_rate: float):
+                dropout: float, base_rate: float, radius: float = 15.0):
     import torch
     from torch import nn
 
     uses_scene = KINDS[kind][0]
+
+    class GraphLayer(nn.Module):
+        """One round of messages between linked players, each message
+        conditioned on the link's distance, direction and relative velocity."""
+
+        def __init__(self):
+            super().__init__()
+            # A linear layer on [h_i, h_j, e_ij], split into its three parts so
+            # the player terms are computed once per player, not once per pair.
+            self.receiver = nn.Linear(d, d)
+            self.sender = nn.Linear(d, d, bias=False)
+            self.edge = nn.Linear(N_EDGE, d, bias=False)
+            self.message = nn.Linear(d, d)
+            self.update = nn.Sequential(nn.Linear(2 * d, d), nn.ReLU(), nn.Dropout(dropout),
+                                        nn.Linear(d, d))
+            self.norm = nn.LayerNorm(d)
+
+        def forward(self, h, E, adj):
+            pre = (self.receiver(h)[:, :, None, :] + self.sender(h)[:, None, :, :]
+                   + self.edge(E))
+            m = self.message(torch.relu(pre))
+            a = adj.unsqueeze(-1).to(h.dtype)
+            agg = (m * a).sum(2) / a.sum(2).clamp(min=1.0)   # mean over neighbours
+            return self.norm(h + self.update(torch.cat([h, agg], dim=-1)))
 
     class SetModel(nn.Module):
         def __init__(self):
@@ -144,6 +202,9 @@ def build_model(kind: str, n_feat: int, n_ctx: int, d: int, layers: int, heads: 
             self.kind = kind
             if not uses_scene:
                 pass
+            elif kind == "gnn":
+                self.embed = nn.Linear(n_feat, d)
+                self.graph = nn.ModuleList([GraphLayer() for _ in range(layers)])
             elif kind == "transformer":
                 self.embed = nn.Linear(n_feat, d)
                 layer = nn.TransformerEncoderLayer(
@@ -171,6 +232,10 @@ def build_model(kind: str, n_feat: int, n_ctx: int, d: int, layers: int, heads: 
             h = self.embed(X)
             if self.kind == "transformer":
                 h = self.mixer(h, src_key_padding_mask=~mask)
+            elif self.kind == "gnn":
+                E, adj = edge_features(X, mask, radius)
+                for layer in self.graph:
+                    h = layer(h, E, adj)
             m = mask.unsqueeze(-1).to(h.dtype)
             mean = (h * m).sum(1) / m.sum(1).clamp(min=1.0)
             peak = h.masked_fill(~mask.unsqueeze(-1), -1e4).max(1).values
@@ -180,6 +245,15 @@ def build_model(kind: str, n_feat: int, n_ctx: int, d: int, layers: int, heads: 
             return self.head(z).squeeze(-1)
 
     return SetModel()
+
+
+def _logits(model, X, M, C, chunk: int = 512):
+    """Predict in chunks, so the graph model does not build every pair at once."""
+    import torch
+
+    with torch.no_grad():
+        return torch.cat([model(X[i:i + chunk], M[i:i + chunk], C[i:i + chunk])
+                          for i in range(0, len(X), chunk)])
 
 
 def fit_predict(X, M, C, y, groups, train, test, kind, args, seed):
@@ -201,7 +275,8 @@ def fit_predict(X, M, C, y, groups, train, test, kind, args, seed):
     Xv, Mv, Cv, yv = t(X[val]), t(M[val], torch.bool), t(C[val]), t(y[val])
 
     model = build_model(kind, X.shape[2], C.shape[1], args.width, args.layers, args.heads,
-                        args.dropout, base_rate=float(y[fit].mean())).to(device)
+                        args.dropout, base_rate=float(y[fit].mean()),
+                        radius=args.gnn_radius).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_fn = nn.BCEWithLogitsLoss()
     flip = torch.ones(X.shape[2], device=device)
@@ -228,7 +303,7 @@ def fit_predict(X, M, C, y, groups, train, test, kind, args, seed):
             opt.step()
         model.eval()
         with torch.no_grad():
-            vloss = loss_fn(model(Xv, Mv, Cv), yv).item()
+            vloss = loss_fn(_logits(model, Xv, Mv, Cv), yv).item()
         if vloss < best - 1e-4:
             best, best_epoch, stale = vloss, epoch + 1, 0
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -241,8 +316,7 @@ def fit_predict(X, M, C, y, groups, train, test, kind, args, seed):
         raise SystemExit("validation loss was never finite; try a lower --lr and paste the output")
     model.load_state_dict(best_state)
     model.eval()
-    with torch.no_grad():
-        logits = model(t(X[test]), t(M[test], torch.bool), t(C[test]))
+    logits = _logits(model, t(X[test]), t(M[test], torch.bool), t(C[test]))
     info = (f"best epoch {best_epoch:>2}/{epoch + 1:<2}  "
             f"val loss {best:.4f} (base rate {base_loss:.4f})")
     return torch.sigmoid(logits).cpu().numpy(), info
@@ -299,6 +373,10 @@ def report(results: dict, data, label, n_boot, seed):
         ("tracking_geometry", "ensemble", "averaging the transformer with the tabular model"),
         ("mlp_context", "deepsets", "the raw scene on a neural context model, players alone"),
         ("mlp_context", "transformer", "the raw scene on a neural context model, players together"),
+        ("mlp_context", "gnn", "the raw scene on a neural context model, as a graph"),
+        ("deepsets", "gnn", "what linking nearby players with distances adds"),
+        ("gnn_placebo", "gnn", "real graphs against shuffled ones"),
+        ("gnn", "mlp_metrics", "the hand-made metrics against the graph"),
         ("mlp_context", "mlp_metrics", "the hand-made metrics on a neural context model"),
         ("mlp_metrics_placebo", "mlp_metrics", "real metrics against shuffled ones"),
         ("transformer", "mlp_metrics", "the hand-made metrics against the raw scene"),
@@ -319,7 +397,7 @@ def report(results: dict, data, label, n_boot, seed):
 # --- self test -------------------------------------------------------------------
 
 def selftest(args) -> int:
-    """Synthetic scenes where the answer is known; both models must learn something.
+    """Synthetic scenes where the answer is known; every scene model must learn something.
 
     The outcome depends on (a) how many defenders stand within 10 m of the
     carrier, which each player relative to the carrier reveals, and (b) how
@@ -361,7 +439,7 @@ def selftest(args) -> int:
 
     args.folds = 3
     ok = True
-    for kind in ("deepsets", "transformer"):
+    for kind in [k for k in args.models.split(",") if KINDS.get(k, (False,))[0]]:
         print(f"  {kind}")
         oof = cross_validate(data, X, M, y, kind, args)
         done = ~np.isnan(oof)
@@ -393,6 +471,8 @@ def main() -> int:
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--gnn-radius", type=float, default=15.0,
+                    help="players closer than this (metres) are linked in the graph")
     ap.add_argument("--mirror", action="store_true",
                     help="augment by flipping scenes top to bottom (off by default: "
                          "SkillCorner's channel in the context is not flipped with them)")
@@ -427,7 +507,7 @@ def main() -> int:
         t0 = time.time()
         preds[kind] = cross_validate(data, X, M, y, kind, args)
         print(f"  done in {(time.time() - t0) / 60:.1f} min\n")
-    for kind in ("transformer", "mlp_metrics"):
+    for kind in ("transformer", "gnn", "mlp_metrics"):
         if not args.skip_placebo and kind in preds:
             what = "scenes" if KINDS[kind][0] else "metrics"
             print(f"{kind} placebo ({what} shuffled within each match)")
