@@ -526,7 +526,8 @@ document.getElementById('rec').onclick = () => {
   play();
 };
 
-window.__render = render;   // for frame-by-frame rendering
+window.__render = render;   // for frame-by-frame rendering (scripts/render_press3d.py)
+window.__duration = DURATION;
 if (params.has('v')) { render(+params.get('v')); document.title = 'ready'; }
 else play();
 </script>

@@ -21,8 +21,8 @@ python scripts/bodypose_extract.py    # needs data/bodypose/
 python scripts/bodypose_press.py
 python scripts/figure_press.py --event 1996435 9_684   # Figure 1
 
-# The README's animation: cut the press out of the body pose data, then open
-# viz/press3d.html in Chrome, press "Record video" and convert the WebM with
-# the ffmpeg line at the top of that file. Recording needs a browser, so it is
-# the one step this script cannot do.
+# The README's animation: cut the press out of the body pose data, then
+# render it frame by frame into figures/press3d.mp4 and the README GIF. To
+# watch it instead, open viz/press3d.html in Chrome.
 python scripts/export_pose_clip.py
+python scripts/render_press3d.py
