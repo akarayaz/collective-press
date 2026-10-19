@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Press in 3D</title>
+<!--
+  One press in 3D, from SkillCorner's tracking and body pose.
+
+    python scripts/export_pose_clip.py     # writes cache/press3d_clip.js
+    then open this file in Chrome (double-click is enough)
+
+  "Record video" plays the clip once and saves it as a 1920 x 1080 WebM.
+  Convert it for editing:  ffmpeg -i press3d.webm -c:v libx264 -crf 18 -pix_fmt yuv420p press3d.mp4
+  and for the README:      ffmpeg -i press3d.webm -vf "fps=12,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4" figures/press_animation.gif
+  URL options: ?theme=light  ?slow=0.5  ?pause=6  ?v=12.5 (show one moment, for stills)
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d0f; color: #e8e8e4;
+               font-family: Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
+  #out { width: min(96vw, calc((100vh - 70px) * 16 / 9)); aspect-ratio: 16 / 9; display: block; }
+  #bar { display: flex; gap: 10px; align-items: center; font-size: 14px; }
+  button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid #555;
+           background: #1d2125; color: inherit; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #msg { color: #9aa1a6; }
+  #missing { max-width: 640px; line-height: 1.5; padding: 24px; }
+</style>
+<script type="importmap">
+  { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+<script src="../cache/press3d_clip.js"></script>
+</head>
+<body>
+<canvas id="out" width="1920" height="1080"></canvas>
+<div id="bar">
+  <button id="play">Replay</button>
+  <button id="rec">Record video</button>
+  <button id="theme">Light / dark</button>
+  <span id="msg"></span>
+</div>
+<script type="module">
+import * as THREE from 'three';
+
+const D = window.PRESS3D;
+if (!D) {
+  document.body.innerHTML = '<div id="missing">No clip found. Run <code>python scripts/export_pose_clip.py</code> ' +
+    'in the repository; it writes <code>cache/press3d_clip.js</code>, which this page reads.</div>';
+  throw new Error('cache/press3d_clip.js not loaded');
+}
+
+// ---------------------------------------------------------------- settings
+const params = new URLSearchParams(location.search);
+const W = 1920, H = 1080;
+const SLOW = +(params.get('slow') || 0.5);      // playback speed
+const PAUSE = +(params.get('pause') || 6);      // seconds held on the start frame
+const HOLD = 1.5;                               // seconds on the last frame
+const THEMES = {
+  dark:  { bg: '#0f1317', pitch: '#182026', line: '#9aa6ad', ink: '#f3f3ef', ink2: '#b4bbc0',
+           ink3: '#7f898f', press: '#4b93ec', poss: '#f07a45', ball: '#ffffff', panel: 'rgba(15,19,23,0.78)',
+           clear: 'rgba(15,19,23,0)' },
+  light: { bg: '#fcfcfb', pitch: '#efeee8', line: '#b8b7b0', ink: '#0b0b0b', ink2: '#52514e',
+           ink3: '#8c8b84', press: '#2a78d6', poss: '#eb6834', ball: '#111111', panel: 'rgba(252,252,251,0.85)',
+           clear: 'rgba(252,252,251,0)' },
+};
+const themeName = params.get('theme') === 'light' ? 'light' : 'dark';
+const C = THEMES[themeName];
+const FONT = 'Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif';
+
+// Pitch (x along, y across, metres) to three.js (X right, Y up, Z towards the camera).
+const V = (x, y, z = 0) => new THREE.Vector3(x, z, -y);
+
+// ---------------------------------------------------------------- the story clock
+const T0 = -D.before, T1 = D.after;
+const PLAY_BEFORE = (0 - T0) / SLOW, PLAY_AFTER = (T1 - 0) / SLOW;
+const DURATION = PLAY_BEFORE + PAUSE + PLAY_AFTER + HOLD;
+function story(v) {           // video seconds -> {act, t, k (0..1 into the pause)}
+  if (v < PLAY_BEFORE) return { act: 'before', t: T0 + v * SLOW, k: 0 };
+  v -= PLAY_BEFORE;
+  if (v < PAUSE) return { act: 'pause', t: 0, k: v / PAUSE };
+  v -= PAUSE;
+  return { act: 'after', t: Math.min(T1, v * SLOW), k: 1 };
+}
+
+// ---------------------------------------------------------------- data access
+const J = Object.fromEntries(D.joints.map((n, i) => [n, i]));
+const frames = D.frames;
+const ids = Object.keys(D.side);
+const OV = D.overlay;
+
+function sample(t) {          // players and ball at time t, interpolated between pose frames
+  let i = frames.findIndex(f => f.t > t);
+  if (i === -1) i = frames.length;
+  const a = frames[Math.max(0, i - 1)], b = frames[Math.min(frames.length - 1, i)];
+  const w = b.t > a.t ? Math.min(1, Math.max(0, (t - a.t) / (b.t - a.t))) : 0;
+  const players = {};
+  for (const id of ids) {
+    const pa = a.p[id], pb = b.p[id];
+    if (!pa && !pb) continue;
+    const A = pa || pb, B = pb || pa;
+    const p = { x: A.x + (B.x - A.x) * w, y: A.y + (B.y - A.y) * w, j: null };
+    if (A.j || B.j) {
+      const near = w < 0.5 ? (A.j || B.j) : (B.j || A.j);
+      p.j = near.map((q, k) => {
+        const qa = A.j && A.j[k], qb = B.j && B.j[k];
+        if (qa && qb) return [qa[0] + (qb[0] - qa[0]) * w, qa[1] + (qb[1] - qa[1]) * w, qa[2] + (qb[2] - qa[2]) * w];
+        return q;
+      });
+    }
+    players[id] = p;
+  }
+  let ball = null;
+  if (a.ball && b.ball) ball = a.ball.map((v, k) => v + (b.ball[k] - v) * w);
+  else ball = a.ball || b.ball;
+  return { players, ball };
+}
+
+function facing(j) {          // unit vector the upper body faces, from the shoulders (hips as fallback)
+  for (const [l, r] of [['lShoulder', 'rShoulder'], ['lHip', 'rHip']]) {
+    const a = j[J[l]], b = j[J[r]];
+    if (a && b) {
+      const dx = a[0] - b[0], dy = a[1] - b[1];
+      const n = Math.hypot(dx, dy);
+      if (n > 1e-6) return [dy / n, -dx / n];
+    }
+  }
+  return null;
+}
+
+// Camera target: the ball, smoothed over a second, settling on the carrier at the start.
+const start = sample(0);
+const carrier0 = start.players[OV.carrier];
+function target(t) {
+  let sx = 0, sy = 0, n = 0;
+  for (const f of frames) if (Math.abs(f.t - t) <= 0.5 && f.ball) { sx += f.ball[0]; sy += f.ball[1]; n++; }
+  const bx = n ? sx / n : carrier0.x, by = n ? sy / n : carrier0.y;
+  const k = Math.exp(-Math.abs(t) / 0.6);
+  return [bx * (1 - k) + carrier0.x * k, by * (1 - k) + carrier0.y * k];
+}
+
+// ---------------------------------------------------------------- scene
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(W, H, false);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(C.bg);
+scene.fog = new THREE.Fog(C.bg, 70, 150);
+const camera = new THREE.PerspectiveCamera(30, W / H, 0.5, 400);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+sun.position.set(-30, 60, 40);
+scene.add(sun);
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(125, 88),
+  new THREE.MeshBasicMaterial({ color: C.pitch }));
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+// Pitch markings as thin flat strips, so they keep their width on screen.
+const lineMat = new THREE.MeshBasicMaterial({ color: C.line, transparent: true, opacity: themeName === 'dark' ? 0.6 : 1 });
+function strip(points, width = 0.12, mat = lineMat, y = 0.01) {
+  const pos = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const [x1, y1] = points[i], [x2, y2] = points[i + 1];
+    const dx = x2 - x1, dy = y2 - y1, n = Math.hypot(dx, dy) || 1;
+    const ox = -dy / n * width / 2, oy = dx / n * width / 2;
+    const q = [[x1 + ox, y1 + oy], [x1 - ox, y1 - oy], [x2 - ox, y2 - oy], [x2 + ox, y2 + oy]].map(([a, b]) => V(a, b, y));
+    pos.push(...q[0].toArray(), ...q[1].toArray(), ...q[2].toArray(), ...q[0].toArray(), ...q[2].toArray(), ...q[3].toArray());
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  const m = new THREE.Mesh(g, mat);
+  m.material.side = THREE.DoubleSide;
+  return m;
+}
+const arc = (cx, cy, r, a0, a1, n = 48) => Array.from({ length: n + 1 }, (_, i) => {
+  const a = a0 + (a1 - a0) * i / n; return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+});
+const L = 52.5, Wd = 34;
+const pitch = new THREE.Group();
+pitch.add(strip([[-L, -Wd], [L, -Wd], [L, Wd], [-L, Wd], [-L, -Wd]]));
+pitch.add(strip([[0, -Wd], [0, Wd]]));
+pitch.add(strip(arc(0, 0, 9.15, 0, 2 * Math.PI, 96)));
+for (const s of [-1, 1]) {
+  pitch.add(strip([[s * L, -20.16], [s * (L - 16.5), -20.16], [s * (L - 16.5), 20.16], [s * L, 20.16]]));
+  pitch.add(strip([[s * L, -9.16], [s * (L - 5.5), -9.16], [s * (L - 5.5), 9.16], [s * L, 9.16]]));
+  pitch.add(strip(arc(s * (L - 11), 0, 9.15, s > 0 ? Math.PI - 0.93 : -0.93, s > 0 ? Math.PI + 0.93 : 0.93, 24)));
+  // goal frame
+  const gm = new THREE.MeshStandardMaterial({ color: C.ink2 });
+  for (const gy of [-3.66, 3.66]) {
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 2.44, 8), gm);
+    post.position.copy(V(s * L, gy, 1.22)); pitch.add(post);
+  }
+  const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 7.32, 8), gm);
+  bar.rotation.x = Math.PI / 2; bar.position.copy(V(s * L, 0, 2.44)); pitch.add(bar);
+}
+scene.add(pitch);
+
+// Bodies: one instanced mesh for every bone and one for every joint, of everyone.
+const BONES = [
+  ['nose', 'neck'], ['neck', 'lShoulder'], ['neck', 'rShoulder'], ['lShoulder', 'lElbow'], ['lElbow', 'lWrist'],
+  ['rShoulder', 'rElbow'], ['rElbow', 'rWrist'], ['neck', 'midHip'], ['midHip', 'lHip'], ['midHip', 'rHip'],
+  ['lShoulder', 'lHip'], ['rShoulder', 'rHip'], ['lHip', 'lKnee'], ['lKnee', 'lAnkle'], ['rHip', 'rKnee'],
+  ['rKnee', 'rAnkle'], ['lAnkle', 'lHeel'], ['lAnkle', 'lBigToe'], ['rAnkle', 'rHeel'], ['rAnkle', 'rBigToe'],
+].map(([a, b]) => [J[a], J[b]]);
+const DOTS = ['lShoulder', 'rShoulder', 'lElbow', 'rElbow', 'lWrist', 'rWrist', 'lHip', 'rHip',
+              'lKnee', 'rKnee', 'lAnkle', 'rAnkle'].map(n => J[n]);
+const teamColour = id => new THREE.Color(D.side[id] === 'pressing' ? C.press : C.poss);
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.55, metalness: 0.0 });
+const bones = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1, 1, 8), bodyMat, ids.length * BONES.length);
+const dots = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 10, 8), bodyMat, ids.length * (DOTS.length + 1));
+ids.forEach((id, i) => {
+  for (let k = 0; k < BONES.length; k++) bones.setColorAt(i * BONES.length + k, teamColour(id));
+  for (let k = 0; k <= DOTS.length; k++) dots.setColorAt(i * (DOTS.length + 1) + k, teamColour(id));
+});
+scene.add(bones, dots);
+
+const discs = {}, ghosts = {};
+for (const id of ids) {
+  const d = new THREE.Mesh(new THREE.CircleGeometry(0.55, 32),
+    new THREE.MeshBasicMaterial({ color: teamColour(id), transparent: true, opacity: 0.85 }));
+  d.rotation.x = -Math.PI / 2; scene.add(d); discs[id] = d;
+  const g = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 1.25, 4, 12),
+    new THREE.MeshStandardMaterial({ color: teamColour(id), transparent: true, opacity: 0.35 }));
+  scene.add(g); ghosts[id] = g;
+}
+const rings = {};
+for (const id of [OV.carrier, OV.presser]) {
+  const r = new THREE.Mesh(new THREE.RingGeometry(0.85, 1.0, 48),
+    new THREE.MeshBasicMaterial({ color: teamColour(id), side: THREE.DoubleSide }));
+  r.rotation.x = -Math.PI / 2; scene.add(r); rings[id] = r;
+}
+const ball = new THREE.Mesh(new THREE.SphereGeometry(0.13, 20, 14),
+  new THREE.MeshStandardMaterial({ color: C.ball, emissive: themeName === 'dark' ? 0x333333 : 0x000000 }));
+const ballShadow = new THREE.Mesh(new THREE.CircleGeometry(0.16, 20),
+  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 }));
+ballShadow.rotation.x = -Math.PI / 2;
+scene.add(ball, ballShadow);
+
+// Carrier's facing arrow, flat on the ground.
+const arrowMat = new THREE.MeshBasicMaterial({ color: C.ink, transparent: true, opacity: 0.95, side: THREE.DoubleSide });
+const arrowShape = new THREE.Shape([[0, -0.09], [2.2, -0.09], [2.2, -0.32], [2.9, 0], [2.2, 0.32], [2.2, 0.09], [0, 0.09]]
+  .map(([a, b]) => new THREE.Vector2(a, b)));
+const arrow = new THREE.Mesh(new THREE.ShapeGeometry(arrowShape), arrowMat);
+scene.add(arrow);
+
+// The start-frame overlay, as in Figure 1. Built once, faded in during the pause.
+const ovGroup = new THREE.Group();
+scene.add(ovGroup);
+const fade = [];
+function ovMat(colour, opacity) {
+  const m = new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false });
+  fade.push([m, opacity]); return m;
+}
+function dashed(a, b, dash = 0.7, gap = 0.5) {
+  const out = [], n = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  for (let s = 0; s < n; s += dash + gap) {
+    const e = Math.min(n, s + dash);
+    out.push([[a[0] + (b[0] - a[0]) * s / n, a[1] + (b[1] - a[1]) * s / n],
+              [a[0] + (b[0] - a[0]) * e / n, a[1] + (b[1] - a[1]) * e / n]]);
+  }
+  return out;
+}
+const P0 = start.players;
+const at = id => P0[id] ? [P0[id].x, P0[id].y] : null;
+const cxy = at(OV.carrier), pxy = at(OV.presser), mxy = at(OV.mate);
+{
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(OV.radius, 96), ovMat(C.press, 0.10));
+  disc.rotation.x = -Math.PI / 2; disc.position.copy(V(cxy[0], cxy[1], 0.02)); ovGroup.add(disc);
+  const circ = arc(cxy[0], cxy[1], OV.radius, 0, 2 * Math.PI, 120);
+  for (let i = 0; i < circ.length - 1; i += 2) ovGroup.add(strip([circ[i], circ[i + 1]], 0.14, ovMat(C.press, 0.95), 0.03));
+  if (mxy) ovGroup.add(strip([pxy, mxy], 0.16, ovMat(C.ink, 0.95), 0.04));
+  for (const id of OV.shadowed) if (at(id)) for (const s of dashed(cxy, at(id), 0.5, 0.45)) ovGroup.add(strip(s, 0.13, ovMat(C.ink3, 0.95), 0.04));
+  for (const id of OV.open) if (at(id)) ovGroup.add(strip([cxy, at(id)], 0.2, ovMat(C.poss, 0.95), 0.04));
+  if (OV.back_line_x != null) for (const s of dashed([OV.back_line_x, cxy[1] - 26], [OV.back_line_x, cxy[1] + 26], 1.0, 0.7))
+    ovGroup.add(strip(s, 0.13, ovMat(C.ink3, 0.9), 0.03));
+}
+
+// ---------------------------------------------------------------- per frame
+const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
+const hidden = new THREE.Matrix4().makeScale(0, 0, 0);
+function setBone(i, a, b, r) {
+  const A = V(...a), B = V(...b), d = B.clone().sub(A), len = d.length();
+  if (len < 1e-4) { bones.setMatrixAt(i, hidden); return; }
+  q.setFromUnitVectors(up, d.divideScalar(len));
+  m4.compose(A.add(B).multiplyScalar(0.5), q, new THREE.Vector3(r, len, r));
+  bones.setMatrixAt(i, m4);
+}
+function setDot(i, p, r) {
+  if (!p) { dots.setMatrixAt(i, hidden); return; }
+  m4.compose(V(...p), new THREE.Quaternion(), new THREE.Vector3(r, r, r));
+  dots.setMatrixAt(i, m4);
+}
+const heads = {};
+function pose(t) {
+  const s = sample(t);
+  ids.forEach((id, i) => {
+    const p = s.players[id];
+    const show = !!p;
+    discs[id].visible = show; ghosts[id].visible = show && !p.j;
+    if (rings[id]) rings[id].visible = show;
+    if (show) {
+      discs[id].position.copy(V(p.x, p.y, 0.015));
+      ghosts[id].position.copy(V(p.x, p.y, 0.85));
+      if (rings[id]) rings[id].position.copy(V(p.x, p.y, 0.02));
+    }
+    for (let k = 0; k < BONES.length; k++) {
+      const [a, b] = BONES[k];
+      if (p && p.j && p.j[a] && p.j[b]) setBone(i * BONES.length + k, p.j[a], p.j[b], k < 7 || k > 15 ? 0.055 : 0.07);
+      else bones.setMatrixAt(i * BONES.length + k, hidden);
+    }
+    DOTS.forEach((jk, k) => setDot(i * (DOTS.length + 1) + k, p && p.j ? p.j[jk] : null, 0.065));
+    let head = null;
+    if (p && p.j) {
+      const pts = ['nose', 'lEar', 'rEar', 'lEye', 'rEye'].map(n => p.j[J[n]]).filter(Boolean);
+      if (pts.length) head = [0, 1, 2].map(c => pts.reduce((acc, v) => acc + v[c], 0) / pts.length);
+    }
+    setDot(i * (DOTS.length + 1) + DOTS.length, head, 0.13);
+    heads[id] = p ? (head ? head : [p.x, p.y, 1.8]) : null;
+  });
+  bones.instanceMatrix.needsUpdate = true; dots.instanceMatrix.needsUpdate = true;
+
+  ball.visible = ballShadow.visible = !!s.ball;
+  if (s.ball) {
+    ball.position.copy(V(s.ball[0], s.ball[1], Math.max(0.13, s.ball[2])));
+    ballShadow.position.copy(V(s.ball[0], s.ball[1], 0.012));
+  }
+
+  const c = s.players[OV.carrier], f = c && c.j ? facing(c.j) : null;
+  arrow.visible = !!f;
+  if (f) {
+    arrow.position.copy(V(c.x + f[0] * 0.7, c.y + f[1] * 0.7, 0.05));
+    arrow.rotation.set(-Math.PI / 2, 0, Math.atan2(f[1], f[0]));
+  }
+  return s;
+}
+
+function placeCamera(t, k, act) {
+  const [tx, ty] = target(t);
+  // A slow quarter turn while the frame is held shows the bodies are 3D.
+  const e = act === 'before' ? 0 : act === 'pause' ? smooth(Math.min(1, k * 1.3)) : 1;
+  const orbit = e * 0.3;                                    // radians
+  const dist = 31, height = 15;
+  camera.position.set(tx - Math.sin(orbit) * dist - 3, height, -ty + Math.cos(orbit) * dist);
+  camera.lookAt(V(tx + 2, ty, 0));
+  // Slide the picture right while the text panel is open, so nothing hides behind it.
+  const after = act === 'after' ? smooth(Math.min(1, t / 0.8)) : 0;
+  const shift = act === 'before' ? 0 : act === 'pause' ? smooth(Math.min(1, k * 3)) * 330 : 330 - 170 * after;
+  camera.setViewOffset(W, H, -shift, 0, W, H);
+}
+const smooth = x => x * x * (3 - 2 * x);
+
+// ---------------------------------------------------------------- 2D layer: text drawn into the video
+const out = document.getElementById('out');
+const ctx = out.getContext('2d');
+function project(p) {
+  const v = V(...p).project(camera);
+  return [(v.x + 1) / 2 * W, (1 - v.y) / 2 * H, v.z < 1];
+}
+function text(s, x, y, size, colour, weight = 400, align = 'left') {
+  ctx.font = `${weight} ${size}px ${FONT}`; ctx.fillStyle = colour; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillText(s, x, y);
+}
+function badge(n, x, y, alpha = 1) {
+  ctx.globalAlpha = alpha;
+  ctx.beginPath(); ctx.arc(x, y, 17, 0, 2 * Math.PI); ctx.fillStyle = C.ink; ctx.fill();
+  text(String(n), x, y + 1, 19, C.bg, 700, 'center');
+  ctx.globalAlpha = 1;
+}
+function label(id, role, avoid = null) {
+  // Above the head; below the feet instead when that would cover another label.
+  const h = heads[id]; if (!h) return null;
+  const name = D.names[id] || '';
+  ctx.font = `600 22px ${FONT}`;
+  const w = ctx.measureText(`${name}  ${role}`).width + 20;
+  const [x, y, ok] = project([h[0], h[1], h[2] + 0.55]); if (!ok) return null;
+  let box = [x - w / 2, y - 34, w, 34];
+  const hit = b => avoid && !(b[0] + b[2] < avoid[0] || avoid[0] + avoid[2] < b[0] ||
+                              b[1] + b[3] < avoid[1] || avoid[1] + avoid[3] < b[1]);
+  if (hit(box)) { const [fx, fy] = project([h[0], h[1], -0.6]); box = [fx - w / 2, fy, w, 34]; }
+  ctx.fillStyle = C.panel; ctx.beginPath(); ctx.roundRect(...box, 8); ctx.fill();
+  text(name, box[0] + 10, box[1] + 17, 22, D.side[id] === 'pressing' ? C.press : C.poss, 600);
+  text(role, box[0] + w - 10, box[1] + 17, 20, C.ink2, 400, 'right');
+  return box;
+}
+const METRICS = [
+  ['Press density', `${OV.values.n_local} defenders within 10 m`],
+  ['Press support', `nearest teammate ${OV.values.support} m away`],
+  ['Block depth', `${OV.values.depth} m from front to back`],
+  ['Open outlets', `${OV.values.open_short} free within 15 m`],
+  ['Cover shadow', `${OV.values.shadowed} lane${OV.values.shadowed === 1 ? '' : 's'} closed`],
+];
+function draw2D(st, alpha) {
+  ctx.drawImage(renderer.domElement, 0, 0);
+
+  // badges on the overlay, while it is shown
+  if (alpha > 0.01) {
+    // Each badge sits on the line it names, at the first spot along it that is
+    // clear of the badges already placed (lines often run side by side).
+    const lines = [[1, [cxy[0], cxy[1] + OV.radius], [cxy[0], cxy[1] + OV.radius]]];
+    if (mxy) lines.push([2, pxy, mxy]);
+    if (OV.back_line_x != null) lines.push([3, [OV.back_line_x, cxy[1] + 4], [OV.back_line_x, cxy[1] + 20]]);
+    if (OV.open.length && at(OV.open[0])) lines.push([4, cxy, at(OV.open[0])]);
+    if (OV.shadowed.length && at(OV.shadowed[0])) lines.push([5, pxy, at(OV.shadowed[0])]);
+    const placed = [];
+    for (const [n, a, b] of lines) {
+      let best = null;
+      for (const t of [0.5, 0.35, 0.65, 0.25, 0.75, 0.15, 0.85]) {
+        const [x, y, ok] = project([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 0]);
+        if (!ok) continue;
+        if (!best) best = [x, y];
+        if (placed.every(([px, py]) => Math.hypot(px - x, py - y) > 46)) { best = [x, y]; break; }
+      }
+      if (best) { placed.push(best); badge(n, best[0], best[1], alpha); }
+    }
+  }
+
+  // title block
+  const x0 = 64;
+  const tall = st.act === 'pause';
+  const bodyLine = D.carrier_to_goal != null && (st.act === 'after' || st.k > 0.8);
+  ctx.fillStyle = C.panel; ctx.beginPath();
+  // The panel grows with what it shows, instead of opening empty.
+  const rows = tall ? Math.min(METRICS.length, Math.floor(st.k * (METRICS.length + 2))) : 0;
+  const h = tall ? 175 + rows * 70 + (bodyLine ? 75 : 0) : (st.act === 'after' && bodyLine ? 230 : 160);
+  ctx.roundRect(x0 - 24, 36, 640, h, 14);
+  ctx.fill();
+  text(`${D.pressing_team} press`, x0, 78, 40, C.press, 700);
+  text(`${D.attacking_team} in possession`, x0, 122, 27, C.poss, 600);
+  let heading = { before: 'The press forms', pause: 'The frame every metric is measured on', after: 'What happens next' }[st.act];
+  let hc = C.ink, hw = 400;
+  if (st.act === 'after' && D.regain != null && st.t >= D.regain) { heading = `Ball won back after ${D.regain.toFixed(1)} s`; hc = C.press; hw = 700; }
+  text(heading, x0, 166, 27, hc, hw);
+
+  if (st.act === 'pause') {
+    const shown = Math.min(METRICS.length, Math.floor(st.k * (METRICS.length + 2)));
+    METRICS.slice(0, shown).forEach(([name, value], i) => {
+      const y = 226 + i * 70;
+      badge(i + 1, x0 + 16, y + 12);
+      text(name, x0 + 48, y, 25, C.ink, 700);
+      text(value, x0 + 48, y + 30, 22, C.ink2, 400);
+    });
+  }
+  if (bodyLine) {
+    const y = st.act === 'pause' ? 226 + METRICS.length * 70 + 8 : 210;
+    text('Body pose', x0, y, 25, C.ink, 700);
+    text(`carrier faces ${D.carrier_to_goal}° away from the goal he attacks (arrow)`, x0, y + 30, 22, C.ink2, 400);
+  }
+
+  // a band behind the timeline and the footer
+  const band = ctx.createLinearGradient(0, H - 150, 0, H);
+  band.addColorStop(0, C.clear); band.addColorStop(0.45, C.panel); band.addColorStop(1, C.panel);
+  ctx.fillStyle = band; ctx.fillRect(0, H - 150, W, 150);
+
+  // timeline
+  const tx0 = W - 520, tx1 = W - 70, ty = H - 70;
+  const X = t => tx0 + (tx1 - tx0) * (t - T0) / (T1 - T0);
+  ctx.lineCap = 'round'; ctx.lineWidth = 5;
+  ctx.strokeStyle = C.ink3; ctx.globalAlpha = 0.45; ctx.beginPath(); ctx.moveTo(tx0, ty); ctx.lineTo(tx1, ty); ctx.stroke();
+  ctx.globalAlpha = 1; ctx.strokeStyle = C.ink2; ctx.beginPath(); ctx.moveTo(tx0, ty); ctx.lineTo(X(st.t), ty); ctx.stroke();
+  ctx.lineWidth = 3; ctx.strokeStyle = C.ink; ctx.beginPath(); ctx.moveTo(X(0), ty - 14); ctx.lineTo(X(0), ty + 14); ctx.stroke();
+  text('press starts', X(0), ty - 30, 19, C.ink2, 400, 'center');
+  if (D.regain != null && D.regain <= T1) {
+    ctx.strokeStyle = C.press; ctx.beginPath(); ctx.moveTo(X(D.regain), ty - 14); ctx.lineTo(X(D.regain), ty + 14); ctx.stroke();
+    text('ball won', X(D.regain), ty + 32, 19, C.press, 400, 'center');
+  }
+  ctx.beginPath(); ctx.arc(X(st.t), ty, 9, 0, 2 * Math.PI); ctx.fillStyle = C.ink; ctx.fill();
+  text(Math.abs(st.t) < 0.05 ? '0.0 s' : `${st.t > 0 ? '+' : ''}${st.t.toFixed(1)} s`, tx1, ty - 30, 19, C.ink3, 400, 'right');
+
+  text('SkillCorner open data: tracking and body pose (29 joints, 25 fps), A-League 2024/25. ' +
+       `Players the camera did not see are drawn as discs. Slowed to ${SLOW}x.`, 40, H - 28, 18, C.ink3);
+
+  // labels on the two players the press is about, on top of everything
+  const box = label(OV.carrier, 'carrier');
+  label(OV.presser, 'presser', box);
+}
+
+function render(v) {
+  const st = story(v);
+  pose(st.t);
+  const alpha = st.act === 'pause' ? smooth(Math.min(1, st.k * 3)) : 0;
+  for (const [m, o] of fade) m.opacity = o * alpha;
+  ovGroup.visible = alpha > 0.01;
+  placeCamera(st.t, st.k, st.act);
+  renderer.render(scene, camera);
+  draw2D(st, alpha);
+}
+
+// ---------------------------------------------------------------- playback and recording
+let t0 = null, recorder = null;
+const msg = document.getElementById('msg');
+function loop(now) {
+  if (t0 === null) t0 = now;
+  const v = (now - t0) / 1000;
+  render(Math.min(v, DURATION));
+  if (v < DURATION) requestAnimationFrame(loop);
+  else { t0 = null; if (recorder) recorder.stop(); }
+}
+function play() { t0 = null; requestAnimationFrame(loop); }
+
+document.getElementById('play').onclick = () => { if (!recorder) play(); };
+document.getElementById('theme').onclick = () => {
+  params.set('theme', themeName === 'dark' ? 'light' : 'dark'); location.search = params.toString();
+};
+document.getElementById('rec').onclick = () => {
+  if (recorder) return;
+  const types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
+  const mimeType = types.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
+  if (!mimeType) { msg.textContent = 'This browser cannot record; use Chrome.'; return; }
+  const chunks = [];
+  recorder = new MediaRecorder(out.captureStream(60), { mimeType, videoBitsPerSecond: 16_000_000 });
+  recorder.ondataavailable = e => e.data.size && chunks.push(e.data);
+  recorder.onstop = () => {
+    const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type: mimeType }));
+    a.download = `press3d_${D.match_id}_${D.event_id}.${ext}`; a.click();
+    msg.textContent = `Saved ${a.download} (${DURATION.toFixed(1)} s).`;
+    recorder = null;
+    for (const b of document.querySelectorAll('button')) b.disabled = false;
+  };
+  for (const b of document.querySelectorAll('button')) b.disabled = true;
+  msg.textContent = `Recording ${DURATION.toFixed(1)} s, keep this tab in front...`;
+  recorder.start();
+  play();
+};
+
+window.__render = render;   // for frame-by-frame rendering
+if (params.has('v')) { render(+params.get('v')); document.title = 'ready'; }
+else play();
+</script>
+</body>
+</html>

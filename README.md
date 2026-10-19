@@ -6,7 +6,7 @@ Pressing is usually measured by how much a team presses (PPDA) or how hard (pres
 
 ![Figure 1](figures/figure1_press.png)
 
-**Figure 1.** One press with the five metrics drawn on it, and how each changes the outcome. [Animated version](ANIMATION_URL).
+**Figure 1.** One press with the five metrics drawn on it, and how each changes the outcome. [Animated in 3D](ANIMATION_URL).
 
 ## Different parts of the press do different jobs
 
