@@ -29,7 +29,6 @@ dependencies = [
 
 [project.optional-dependencies]
 deep = ["torch>=2.2"]   # scripts/train_deep.py
-explain = ["shap>=0.45"]  # scripts/explain_model.py
 dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
