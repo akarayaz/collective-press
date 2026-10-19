@@ -153,7 +153,7 @@ def fit(df: pd.DataFrame, metrics: list[str]):
     design = Design(df, metrics)
     X = design.matrix(df)
     y = df["_y"].to_numpy()
-    model = LogisticRegression(penalty=None, max_iter=5000).fit(X, y)
+    model = LogisticRegression(C=np.inf, max_iter=5000).fit(X, y)
     return design, model
 
 

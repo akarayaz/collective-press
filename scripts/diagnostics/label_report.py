@@ -1,6 +1,6 @@
 """Check the rebuilt recovery label against the one the events file ships.
 
-    python scripts/label_report.py
+    python scripts/diagnostics/label_report.py
 
 Prints, over every available match:
 

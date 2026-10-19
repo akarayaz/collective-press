@@ -1,7 +1,10 @@
 """Do the tracking frames and the events file describe the same moment?
 
-    python scripts/check_alignment.py                # one match
-    python scripts/check_alignment.py --all          # every match
+    python scripts/diagnostics/check_alignment.py                # one match
+    python scripts/diagnostics/check_alignment.py --all          # every match
+
+Writes ``results/diagnostics/alignment_check.csv``, which
+``diagnose_tail.py`` and ``find_reference_frame.py`` read.
 
 Everything downstream assumes that ``frame_start`` on an engagement points at
 the tracking frame where that engagement begins, and that ``player_id`` and
@@ -31,6 +34,9 @@ import pandas as pd  # noqa: E402
 
 from pressing import config, events, metadata, tracking  # noqa: E402
 
+#: Where the diagnostics write; results/ is not tracked by git.
+OUT_DIR = config.REPO_ROOT / "results" / "diagnostics"
+
 
 def check_match(match_id, limit: int | None, seed: int) -> pd.DataFrame:
     match = metadata.load_match(match_id)
@@ -46,7 +52,7 @@ def check_match(match_id, limit: int | None, seed: int) -> pd.DataFrame:
         frame = int(e["frame_start"])
         rec = records.get(frame)
         if rec is None:
-            rows.append({"event_id": e["event_id"], "frame_missing": True})
+            rows.append({"match_id": match_id, "event_id": e["event_id"], "frame_missing": True})
             continue
 
         players = tracking.frame_to_dataframe(rec)
@@ -172,3 +178,19 @@ def main() -> int:
     print(f"\nDistance: tracking vs events file, on {len(err)} engagements")
     print(f"  median      {err.median():.3f} m")
     print(f"  90th pct    {err.quantile(0.90):.3f} m")
+    print(f"  99th pct    {err.quantile(0.99):.3f} m")
+    for limit in (0.5, 1.0, 2.0):
+        print(f"  over {limit:g} m   {(err > limit).mean():.2%}")
+
+    _explain_tail(ok)
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = OUT_DIR / "alignment_check.csv"
+    df["abs_error"] = ok["abs_error"]  # same index; NaN where a distance is missing
+    df.to_csv(out, index=False)
+    print(f"\nfull results: {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

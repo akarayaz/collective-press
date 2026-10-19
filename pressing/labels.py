@@ -10,7 +10,7 @@ So the label is rebuilt from the event sequence instead: an engagement counts
 as a recovery when the **pressing team starts a possession within a few seconds
 of the engagement starting**. That is defined for every engagement, and it
 agrees with ``end_type`` on about nine out of ten of the rows where ``end_type``
-does exist (see ``scripts/label_report.py``).
+does exist (see ``scripts/diagnostics/label_report.py``).
 
 What this label is not
 ----------------------

@@ -1,7 +1,7 @@
 """Which frame does the events file actually describe?
 
-    python scripts/check_alignment.py --all     # writes alignment_check.csv
-    python scripts/find_reference_frame.py
+    python scripts/diagnostics/check_alignment.py --all     # writes results/diagnostics/alignment_check.csv
+    python scripts/diagnostics/find_reference_frame.py
 
 On about 1.4% of engagements the two named players sit tens of metres apart in
 the tracking frame while the events file reports them a few metres apart. The
@@ -41,6 +41,9 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from pressing import config, events, tracking  # noqa: E402
+
+#: Where the diagnostics write; results/ is not tracked by git.
+OUT_DIR = config.REPO_ROOT / "results" / "diagnostics"
 
 #: How close a frame's distance has to be to the reported one to count.
 TOLERANCE_M = 0.25
@@ -133,9 +136,9 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    path = config.REPO_ROOT / "alignment_check.csv"
+    path = OUT_DIR / "alignment_check.csv"
     if not path.is_file():
-        print(f"{path} not found; run scripts/check_alignment.py --all first",
+        print(f"{path} not found; run scripts/diagnostics/check_alignment.py --all first",
               file=sys.stderr)
         return 1
 
@@ -188,7 +191,8 @@ def main() -> int:
     summary.columns = ["frame_start"] + list(CANDIDATES)
     print(summary.T.to_string(float_format=lambda v: f"{v:.1%}"))
 
-    out = config.REPO_ROOT / "reference_frame.csv"
+    out = OUT_DIR / "reference_frame.csv"
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     res.to_csv(out, index=False)
     print(f"\nfull results: {out}")
     return 0

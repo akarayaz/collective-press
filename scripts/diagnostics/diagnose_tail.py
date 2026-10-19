@@ -1,7 +1,7 @@
 """Why do some engagements disagree with the tracking by tens of metres?
 
-    python scripts/check_alignment.py --all     # writes alignment_check.csv
-    python scripts/diagnose_tail.py
+    python scripts/diagnostics/check_alignment.py --all     # writes results/diagnostics/alignment_check.csv
+    python scripts/diagnostics/diagnose_tail.py
 
 About 1.4% of engagements put the two named players far apart in the tracking
 frame while the events file reports them within a few metres. Extrapolated
@@ -35,6 +35,9 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from pressing import config, events, metadata, tracking  # noqa: E402
+
+#: Where the diagnostics write; results/ is not tracked by git.
+OUT_DIR = config.REPO_ROOT / "results" / "diagnostics"
 
 #: A step larger than this between consecutive frames (0.1 s) is not football.
 TELEPORT_M_PER_FRAME = 3.0
@@ -133,9 +136,9 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    path = config.REPO_ROOT / "alignment_check.csv"
+    path = OUT_DIR / "alignment_check.csv"
     if not path.is_file():
-        print(f"{path} not found; run scripts/check_alignment.py --all first",
+        print(f"{path} not found; run scripts/diagnostics/check_alignment.py --all first",
               file=sys.stderr)
         return 1
 
@@ -202,7 +205,8 @@ def main() -> int:
     print(f"\nConcentration: {len(by_match)} of 20 matches contribute; "
           f"worst three\n{by_match.head(3).to_string()}")
 
-    out = config.REPO_ROOT / "tail_diagnosis.csv"
+    out = OUT_DIR / "tail_diagnosis.csv"
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     res.to_csv(out, index=False)
     print(f"\nfull results: {out}")
     return 0

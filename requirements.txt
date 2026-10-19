@@ -1,7 +1,9 @@
-anthropic
-fastapi
-uvicorn[standard]
-sqlalchemy
-psycopg2-binary
-pandas
-statsbombpy
+# Versions the results were produced with (Python 3.11, macOS).
+numpy==1.26.4        # torch 2.2, the last release for Intel Macs, needs NumPy 1.x
+pandas==3.0.6
+scipy==1.17.1
+scikit-learn==1.9.1
+matplotlib==3.11.2
+shap==0.51.0         # scripts/explain_model.py only
+torch==2.2.2         # scripts/train_deep.py only
+pytest==9.1.1
