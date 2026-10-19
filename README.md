@@ -1,220 +1,74 @@
-# Pressing and ball recovery on the SkillCorner A-League open data
+# Not how hard, but how: the shape of a collective press
 
-Work in progress for the SkillCorner x PySport Analytics Cup 2.0, on the
-football theme of defensive positioning.
+SkillCorner x PySport Analytics Cup 2.0 · Alper Karayaz · [One minute video](VIDEO_URL)
 
-**Question.** When a defender engages the player in possession, does the
-pressing side's *positioning* explain ball recovery beyond what SkillCorner's
-own context metrics (pressure level, `xloss`) already say?
+Pressing is usually measured by how much a team presses (PPDA) or how hard (pressure, xloss). This project measures its shape from tracking: how many defenders converge, how close the support is, how compact the block is, which lanes are closed and how many outlets are left. With SkillCorner's context held fixed, it asks what each part does, and whether deep models on the raw scene find more.
 
-Three nested models answer it on the same match-level cross-validation folds:
+![Figure 1](figures/figure1_press.png)
 
-| Model | Inputs | What the comparison isolates |
-|---|---|---|
-| M0 | SkillCorner's own summaries: `xloss`, pressure level, zone, game state | the baseline these metrics already reach |
-| M1 | M0 + hand-built positioning features | whether geometry adds anything |
-| M2 | M0 + a graph network over the tracking frame | whether player-to-player structure adds more |
+**Figure 1.** One press with the five metrics drawn on it, and how each changes the outcome. [Animated version](ANIMATION_URL).
 
-The headline result is the *gain* from M0 to M1 and M2, with match-level
-bootstrap intervals, not any single model's score.
+## Different parts of the press do different jobs
 
-> The label records that the ball was recovered, not that the press caused it.
-> Results are reported as association, never causation.
+* **Numbers win the ball.** Each extra defender within 10 m of the carrier adds 2.3 points (95% CI 1.5 to 3.1) to the chance of a regain within 5 s, from a base rate of 21%. A teammate 5 m closer to the presser adds 2.8 (1.5 to 4.2). Both hold with 3 s and 8 s windows.
+* **Closing lanes steers rather than wins.** Each lane in the presser's cover shadow lowers the regain chance by 1.0 point but forces more backward passes and fewer lost balls.
+* **A compact block makes passes fail** (1.4 points more per 10 m shallower) without changing the regain rate.
+* **Free outlets are the carrier's escape.** Each one lowers his chance of losing the ball by 1.7 points.
 
-## Status
+## Data and method
 
-Data layer, the label, the feature table, and the tabular models. The graph
-model comes next.
+Twenty A-League 2024/25 matches from SkillCorner's open data: tracking at 10 fps and dynamic events. The unit is an on-ball engagement. The label is a regain within 5 s, rebuilt from the events and checked against SkillCorner's own `end_type`.
 
-### The decision rule, fixed before the numbers
+**Scene.** Each press is frozen on its first frame and rotated so the team in possession attacks to the right. Velocities are least squares slopes over the previous 0.5 s. Nothing after the start frame is read.
 
-A gain counts as real only when **both** hold:
+**Cleaning.** We measure the presser to carrier distance in each tracking frame and compare it with the event file's. The median gap is 5 mm and 96% agree within 0.5 m. Before dropping the 251 presses off by more than 2 m we looked for a cause: the tracks show no identity swaps, and scanning 5 s either side finds no common time offset, while agreeing presses match best on the start frame itself. The tail is scattered, not a shift affecting every scene. With 14 empty frames, 17,180 of 17,445 presses remain.
 
-* the 95% interval of the log-loss improvement is entirely above zero, from a
-  bootstrap that resamples **matches**, not rows, since engagements inside a
-  match are not independent;
-* at least **14 of the 20 matches** improve.
+**Metrics.** Thirty two numbers: carrier position, presser approach, players within 5 and 10 m, open outlets by pass length, lanes closed, and the block's depth, width and line. Each is unit tested on hand built scenes.
 
-Validation is leave-one-match-out. Hyperparameters are fixed in
-`pressing.modelling.MODEL_PARAMS` and were never tuned against a test fold.
+**Validation.** Models are fitted leave one match out, intervals resample whole matches, and a placebo shuffles an input within each match to separate information from capacity. Effects come from a logistic regression with SkillCorner's context (xloss, pressure, distance, angle, zone, game state) as splines.
 
-Every comparison also runs a placebo: the tracking features are permuted among
-the rows of each match, which keeps each column's distribution and each
-match's composition but destroys the link between a scene and its outcome. A
-gain that survives that is not coming from the scenes, and means there is a
-leak to find.
+## Does the shape carry information?
 
-`tests/test_modelling.py` points the whole procedure at tables whose answer is
-known in advance: one where the outcome really does depend on the tracking
-features, one where it does not, and one that has been shuffled. It has to say
-"real gain", "no gain", "no gain".
+![Figure 2](figures/model_comparison_label_regain_5s.png)
 
-### Data quality
+**Figure 2.** Gains over a neural network fed only SkillCorner's context (AUC 0.660).
 
-Tracking and the events file agree closely: across all 17,445 engagements the
-presser-to-carrier distance measured in the tracking frame differs from the
-reported `interplayer_distance_start` by a median of **5 mm**, with a median
-signed difference of exactly zero, so there is no systematic offset and
-`frame_start` is the right frame to read.
+The headroom is small: SkillCorner's context does most of the work. Our metrics add 0.009 AUC (13 of 20 matches improve). DeepSets and a Transformer on the raw scene add nothing their shuffled versions do not. A graph network with distances on its edges adds 0.007, about as much as the metrics. Averaging the two gives 0.013 with 18 of 20 matches improving, so they capture partly different things. Gradient boosting agrees (0.017 AUC) but improves 13 of 20 matches, one short of our decision rule.
 
-1.4% of rows disagree by more than 2 m, some by tens of metres. Four
-explanations were tested and the first is the only one that holds:
+## Beyond the press itself
 
-| | |
-|---|---|
-| one position extrapolated rather than seen | present in 54% of them |
-| a player already substituted | 0% |
-| a tracking identity swap | 0%, no impossible steps in either group |
-| the distance describing a different frame | no, offsets are scattered and no named frame fits |
+**Team profiles.** CC Mariners win 3.7 points fewer regains than expected (0.4 to 7.1). Across the 8 teams with three or more matches, teams that close more lanes beat expectation (Spearman r = 0.79) and teams that leave more outlets fall short (r = −0.81). With 8 teams this is exploratory.
 
-The remainder is unexplained and concentrates in three matches, which the
-events files may have been refreshed for separately. Those rows are flagged
-`q_ok = False` and excluded rather than silently repaired.
+**PPDA.** Rebuilt from the events, with engagements as defensive actions. Across 13 teams it tracks how often a team presses in the opponent's half (r = −0.79), but not the shape of its press (density r = −0.26, support r = −0.03) or its regains over expectation (r = −0.35). PPDA says how much a team presses, not how.
 
-### The label
+**Body pose pilot.** SkillCorner's 3D body pose (29 joints, 25 fps) for two matches, joined to tracking frame by frame after checking the alignment: 1,871 presses. Where the presser comes from makes no clear difference once we know which way the carrier faces. A carrier facing his own half plays backwards 11.6 points more often (7.4 to 16.3), loses the ball 4.5 points more (0.3 to 8.8) and plays long 3.4 points less. It does not yet improve prediction across matches.
 
-### The label
+## Limitations and next steps
 
-`end_type` in the events file marks the outcome of an engagement, but it is
-present on only 24.5% of them, and the gaps are not random: about half of the
-possessions that end in a turnover have no engagement labelled at all. So the
-label is rebuilt from the event sequence: **the pressing team starts a
-possession within 5 seconds of the engagement starting.** That is defined for
-all 17,445 engagements.
+Twenty matches, one season, one seed per neural model. The effects are associations: a team may commit more players when a press already looks winnable, and SkillCorner's context removes only part of that. With several outcomes per metric, the scripts report how many significant results chance would produce. Next: body pose for a full season, a leaner metric set (shuffled metrics show noise columns cost accuracy), and what the graph sees that the metrics miss.
 
-Over the 20 matches, measured by `scripts/label_report.py`:
-
-| | |
-|---|---|
-| positive rate at 3 / 5 / 8 s | 11.3% / 21.0% / 31.2% |
-| agreement with `end_type`, where it exists | 87.4% |
-| of which `direct_regain` matched | 92.7% |
-| positive rate where `end_type` is missing | 6.8% |
-| recoveries that came from a restart (5 s) | 1 of 3671 |
-
-The two measurements are independent, so the agreement is the evidence that
-the rebuilt label means what it claims to. The restart count answers a
-specific worry: at these windows, recoveries from throw-ins and free kicks are
-not quietly inflating the positive class.
-
-The window is a parameter, never hard-coded downstream, and the headline
-result has to survive 3 s and 8 s as well.
-
-## Getting the data
-
-The dataset is **not** in this repository. Clone SkillCorner's open data next to
-this folder and fetch the Git LFS objects, which hold the tracking files:
+## Use it
 
 ```bash
-git lfs install
-git clone https://github.com/SkillCorner/opendata.git
-cd opendata && git lfs pull        # about 1.8 GB
+pip install -e .
 ```
 
-A tracking file should be roughly 90 MB. A few hundred bytes means Git LFS did
-not run and only the pointer was cloned. Without Git LFS, fetch a match
-directly:
+```python
+from pressing.api import press_metrics, HEADLINE
 
-```bash
-id=1925299
-curl -L -o "data/matches/$id/${id}_tracking_extrapolated.jsonl" \
-  "https://media.githubusercontent.com/media/SkillCorner/opendata/master/data/matches/$id/${id}_tracking_extrapolated.jsonl"
+players = [
+    {"id": 10, "x": 12.0, "y": -4.0, "side": "attacking"},
+    {"id": 4, "x": 15.5, "y": -3.0, "side": "pressing", "vx": -3.0, "vy": 0.2},
+    # ... everyone on the pitch
+]
+m = press_metrics(players, presser=4, carrier=10, ball=(12.3, -4.1))
+m[HEADLINE["press density"]]  # defenders within 10 m of the carrier
 ```
 
-The code looks for `../opendata/data` by default. Anywhere else, point
-`PRESSING_DATA_DIR` at the `data` folder.
+Any tracking provider works: metres, origin at the centre spot, `attack="left"` if the team in possession attacks left.
 
-## Running it
-
-```bash
-conda create -n analytics-cup python=3.11 -y
-conda activate analytics-cup
-pip install -r requirements.txt
-
-python scripts/plot_scenes.py --match 1925299 --n 3
-```
-
-Each scene is written to `figures/`.
-
-Then the two checks that have to pass before anything is built on this data:
-
-```bash
-python scripts/check_alignment.py --all    # tracking vs events, every match
-python scripts/label_report.py             # the label vs SkillCorner's own
-```
-
-`check_alignment.py` measures the presser-to-carrier distance in the tracking
-frame and compares it with the `interplayer_distance_start` the events file
-reports. The two come from different places, so agreement across thousands of
-engagements is the evidence that `frame_start` points where this code assumes
-it does and that the two named players are the right ones. It also reports how
-often a named player is missing from the frame.
-
-## Layout
-
-```
-pressing/
-    config.py      paths, pitch dimensions, frame rate
-    metadata.py    players, teams, periods, attacking directions
-    tracking.py    streaming frame reader, velocities, orientation
-    events.py      dynamic events, on-ball engagements
-    labels.py      was the ball recovered, rebuilt from the event sequence
-    scene.py       engagements -> oriented snapshots, one file pass per match
-    features.py    positioning features measured off a scene
-    modelling.py   nested feature sets, match-wise CV, bootstrap, decision rule
-    viz.py         drawing a scene
-scripts/
-    plot_scenes.py        draw a few engagements from one match
-    check_alignment.py    tracking frames vs the events file
-    find_reference_frame.py  which frame the events file describes
-    diagnose_tail.py      what is behind the disagreeing rows
-    label_report.py       label diagnostics over every match
-    build_features.py     the modelling table -> cache/engagements.csv
-    run_models.py         the three models, the gains, the placebo
-tests/
-    test_features.py   geometry checks on hand-built scenes
-    test_modelling.py  the decision rule, on tables with a known answer
-```
-
-```bash
-python scripts/build_features.py      # reads every tracking file once
-python scripts/run_models.py          # the comparison
-python tests/test_features.py         # no data needed
-python tests/test_modelling.py        # no data needed
-```
-
-The three models are nested, so each gain is attributable to what was added:
-
-| | |
-|---|---|
-| `context` | SkillCorner's read of the situation: `xloss`, `xshot`, pressure and space codes, EPV, zone, score, clock. No geometry. |
-| `skillcorner_geometry` | plus the geometry SkillCorner already ships: distance and angle to the carrier, the defensive line. A subscriber has these without touching tracking. |
-| `tracking_geometry` | plus everything measured from the tracking frame: support, local counts, blocked passing lanes, closing speed, the shape of the block. |
-
-The headline is the **second** step. The first is reported because knowing
-what the basic geometry is worth is what makes the second number mean
-anything.
-
-Columns are prefixed by role: `meta_` (identity, never an input), `m0_`
-(SkillCorner's summaries), `f_` (positioning from tracking), `q_` (quality),
-`label_`. Only `m0_` and `f_` reach a model, so an outcome column cannot
-quietly become an input.
-
-### Conventions
-
-* Coordinates are metres, origin at the centre spot, so x spans
-  [-52.5, 52.5] and y spans [-34, 34].
-* Scenes are rotated so the **team in possession always attacks towards +x**.
-  Teams swap ends at half time, so raw coordinates are not comparable across
-  periods.
-* On an `on_ball_engagement` row, `team_id` is the pressing team and
-  `attacking_side` is that team's attacking direction. Both verified across all
-  20 matches.
-* Velocities are finite differences over 0.5 s (5 frames at 10 Hz) and are NaN
-  when the earlier frame is unavailable.
-* A hollow marker means SkillCorner extrapolated that position rather than
-  tracking it from the camera.
+**Reproduce.** Put the [SkillCorner open data](https://github.com/SkillCorner/opendata) in `data/` (paths in `pressing/config.py`) and run `bash scripts/reproduce.sh`.
 
 ## Licence
 
-MIT, see `LICENSE.md`. The SkillCorner open data is covered by its own terms.
+Code: MIT ([LICENSE.md](LICENSE.md)). Data: SkillCorner's, not included, used under their open data licence.
