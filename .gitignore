@@ -8,3 +8,4 @@ results/
 figures/
 /*.csv
 .pytest_cache/
+data/
