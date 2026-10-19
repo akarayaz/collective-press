@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pressing"
+version = "0.1.0"
+description = "The shape of a collective press: pressing metrics from football tracking data"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE.md"]
+authors = [{ name = "Alper Karayaz" }]
+requires-python = ">=3.11"
+keywords = ["football", "soccer", "tracking data", "pressing", "sports analytics"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+]
+# Ranges, so the package installs next to other tools. requirements.txt pins
+# the exact versions the results were produced with.
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scipy>=1.11",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+deep = ["torch>=2.2"]   # scripts/train_deep.py
+explain = ["shap>=0.45"]  # scripts/explain_model.py
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["pressing*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

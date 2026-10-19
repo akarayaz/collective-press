@@ -9,3 +9,4 @@ figures/
 /*.csv
 .pytest_cache/
 data/
+*.egg-info/
