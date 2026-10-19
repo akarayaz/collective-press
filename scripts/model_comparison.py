@@ -79,62 +79,81 @@ def compare(df: pd.DataFrame, n_boot: int, seed: int) -> pd.DataFrame:
 
 
 def plot(table: pd.DataFrame, base_auc: float, path: Path) -> None:
+    """Sized for a README: about 880 px wide on GitHub, so text is 9.5 pt and up."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MaxNLocator
 
     n = len(table)
-    fig, axes = plt.subplots(1, 2, figsize=(10, 0.42 * n + 1.9), dpi=200, sharey=True,
-                             gridspec_kw={"wspace": 0.08})
+    fig, axes = plt.subplots(1, 2, figsize=(11, 0.56 * n + 2.7), dpi=200, sharey=True,
+                             gridspec_kw={"wspace": 0.1})
     fig.patch.set_facecolor(SURFACE)
-    y = np.arange(n)[::-1]
-    panels = [("auc_gain", "auc_lo", "auc_hi", "gain in AUC", 1000, "{:+.3f}"),
-              ("ll_gain", "ll_lo", "ll_hi", "gain in log loss (lower loss = gain)", 1000, "{:+.4f}")]
-    for ax, (mid, lo, hi, title, _, fmt) in zip(axes, panels):
+    # A gap between groups, so each block reads as one question.
+    y, pos, last = [], 0.0, None
+    for g in table["group"]:
+        if last is not None and g != last:
+            pos -= 0.55
+        y.append(pos)
+        pos -= 1.0
+        last = g
+    y = np.array(y)
+    panels = [("auc_gain", "auc_lo", "auc_hi", "Gain in AUC", "{:+.3f}"),
+              ("ll_gain", "ll_lo", "ll_hi", "Gain in log loss (lower loss = gain)", "{:+.4f}")]
+    for ax, (mid, lo, hi, title, fmt) in zip(axes, panels):
         ax.set_facecolor(SURFACE)
-        ax.axvline(0, color=INK_MUTED, linewidth=0.9, alpha=0.7)
+        ax.axvline(0, color=INK_MUTED, linewidth=1.0, alpha=0.7)
         for yi, (_, r) in zip(y, table.iterrows()):
             colour = GRAY if r["placebo"] else BLUE
-            ax.hlines(yi, r[lo], r[hi], color=colour, linewidth=2, alpha=0.5)
-            ax.scatter(r[mid], yi, s=55, color=colour, edgecolors=SURFACE, linewidths=2,
+            ax.hlines(yi, r[lo], r[hi], color=colour, linewidth=2.4, alpha=0.5)
+            ax.scatter(r[mid], yi, s=80, color=colour, edgecolors=SURFACE, linewidths=2,
                        zorder=3)
             value = fmt.format(r[mid])
             if float(value) == 0:  # no "+0.000" or "-0.000"
                 value = value.lstrip("+-")
-            ax.annotate(value, (r[hi], yi), xytext=(5, -3),
-                        textcoords="offset points", fontsize=7.5, color=INK_MUTED)
-        ax.set_title(title, fontsize=9, color=INK_MUTED, loc="left")
-        ax.xaxis.set_major_locator(MaxNLocator(5))
-        ax.tick_params(axis="x", colors=INK_MUTED, labelsize=8, length=0)
+            value = value.replace("-", "−")  # same minus sign as the ticks
+            if r[hi] < 0:
+                # The whole interval sits below zero: a label to its right would
+                # cross the zero line, one to its left would hit the row names.
+                ax.annotate(value, (r[mid], yi), xytext=(0, 8), textcoords="offset points",
+                            ha="center", va="bottom", fontsize=9.5, color=INK_MUTED)
+            else:
+                ax.annotate(value, (r[hi], yi), xytext=(6, 0), textcoords="offset points",
+                            ha="left", va="center", fontsize=9.5, color=INK_MUTED)
+        ax.set_title(title, fontsize=10.5, color=INK, loc="left", pad=10)
+        ax.xaxis.set_major_locator(MaxNLocator(4))
+        ax.tick_params(axis="x", colors=INK_MUTED, labelsize=9.5, length=0)
         ax.tick_params(axis="y", length=0)
         ax.xaxis.grid(True, color=INK_MUTED, alpha=0.15, linewidth=0.8)
-        for s in ax.spines.values():
-            s.set_visible(False)
+        for sp in ax.spines.values():
+            sp.set_visible(False)
         left, right = ax.get_xlim()
-        ax.set_xlim(left, right + (right - left) * 0.18)  # room for the value labels
-    axes[0].set_yticks(y, table["label"], fontsize=8.5)
+        ax.set_xlim(left - (right - left) * 0.05, right + (right - left) * 0.22)  # labels
+        ax.set_ylim(y.min() - 0.7, y.max() + 0.9)
+    axes[0].set_yticks(y, table["label"], fontsize=10.5)
     for tick, placebo in zip(axes[0].get_yticklabels(), table["placebo"]):
         tick.set_color(INK_MUTED if placebo else INK)
 
-    # Group names above each block of rows.
+    # Group names above each block of rows, at the left edge of the figure.
     for group, g in table.groupby("group", sort=False):
         top = y[g.index.min()]
-        axes[0].annotate(f"adding {group}", (0, top), xycoords=("axes fraction", "data"),
-                         xytext=(-178, 11), textcoords="offset points", fontsize=8,
-                         color=INK, fontweight="bold", annotation_clip=False)
+        axes[0].annotate(f"Adding {group}", (0.012, top), xycoords=("figure fraction", "data"),
+                         xytext=(0, 15), textcoords="offset points", fontsize=10.5,
+                         color=INK, fontweight="bold", va="center", annotation_clip=False)
 
-    fig.suptitle("What each input adds to SkillCorner's context", x=0.01, ha="left",
-                 fontsize=11, color=INK)
-    fig.text(0.01, 0.01,
-             f"Every model is the same kind of neural network; the baseline sees SkillCorner's "
-             f"context and geometry only (AUC {base_auc:.3f}). Gains are on the same rows, with 95% "
-             "intervals\nfrom resampling matches. Gray: the same input shuffled within each match. "
-             "Shuffled scenes add nothing, so what a scene model gains comes from the scenes. "
-             "Shuffled metrics hurt,\nbecause 32 columns of noise get in the way; for the metrics "
-             "the fair comparison is with zero, not with their gray twin. One seed per model.",
-             fontsize=7, color=INK_MUTED, va="bottom")
-    fig.subplots_adjust(left=0.25, right=0.98, top=0.86, bottom=0.2)
+    fig.text(0.012, 0.965, "What each input adds to SkillCorner's context", fontsize=16,
+             color=INK, ha="left", va="center")
+    fig.text(0.012, 0.915,
+             f"Gain over the same neural network fed only SkillCorner's context and geometry "
+             f"(AUC {base_auc:.3f}), on the same presses,\nwith 95% intervals from resampling "
+             "matches. Gray: the same input shuffled within each match.",
+             fontsize=10, color=INK_MUTED, ha="left", va="center", linespacing=1.35)
+    fig.text(0.012, 0.015,
+             "Shuffled scenes add nothing, so a scene model's gain comes from the scenes. "
+             "Shuffled metrics hurt, as 32 columns of noise get in the way,\nso for the metrics "
+             "the fair comparison is with zero. One seed per model; 17,180 presses in 20 matches.",
+             fontsize=8.5, color=INK_MUTED, ha="left", va="bottom", linespacing=1.35)
+    fig.subplots_adjust(left=0.27, right=0.985, top=0.8, bottom=0.14)
     fig.savefig(path, facecolor=SURFACE)
     plt.close(fig)
 
