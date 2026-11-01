@@ -1,6 +1,6 @@
 # Not how hard, but how: the shape of a collective press
 
-SkillCorner x PySport Analytics Cup 2.0 · Alper Karayaz · [One minute video](VIDEO_URL)
+SkillCorner x PySport Analytics Cup 2.0 · Alper Karayaz · [One minute video](https://www.youtube.com/watch?v=PNYlxH3pvS4)
 
 Pressing is usually measured by how much a team presses (PPDA) or how hard (pressure, xloss). This project measures its shape from tracking: how many defenders converge, how close the support is, how compact the block is, which lanes are closed and how many outlets are left. With SkillCorner's context held fixed, it asks what each part does, and whether deep models on the raw scene find more.
 
